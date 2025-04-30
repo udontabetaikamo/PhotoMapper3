@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <title>住宅写真記録ツール - クラスタ+カウント版</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/exif-js/2.3.0/exif.min.js"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css" />
+  <style>
+    body { font-family: sans-serif; margin: 0; padding: 0; }
+    #map { height: 80vh; width: 100%; }
+    #photo-gallery { height: 20vh; overflow-x: auto; white-space: nowrap; background: #f5f5f5; padding: 10px; display: flex; align-items: center; }
+    .photo-thumb { height: 100px; margin-right: 10px; cursor: pointer; }
+    .photo-thumb:hover { outline: 2px solid blue; }
+    .control { padding: 1em; }
+    .cluster-icon { background: rgba(0,120,255,0.8); color:#fff; border:2px solid #fff; border-radius:50%; display:flex; align-items:center; justify-content:center; font-weight:bold; }
+  </style>
+</head>
+<body>
+  <div class="control">
+    <input type="file" id="image-folder" webkitdirectory directory multiple />
+    <label>クラスタリング半径 (km): <input type="number" id="cluster-radius" value="0.05" step="0.01" min="0.01" max="1" /></label>
+    <button onclick="processPhotos()">クラスタ適用</button>
+    <button onclick="downloadJSON()">JSONダウンロード</button>
+    <span id="status"></span>
+  </div>
+  <div id="map"></div>
+  <div id="photo-gallery"></div>
+  <script>
+    let map = L.map('map').setView([35.749, 139.805], 15);
+    L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png', {
+      attribution: '© 地理院タイル', maxZoom: 18 }).addTo(map);
+
+    const imageInput = document.getElementById('image-folder');
+    const gallery = document.getElementById('photo-gallery');
+    const clusterRadiusInput = document.getElementById('cluster-radius');
+    const status = document.getElementById('status');
+    let photoData = [];
+    let markers = [];
+
+    function getExifLatLng(file){return new Promise(res=>{EXIF.getData(file,function(){const lat=EXIF.getTag(this,'GPSLatitude');const latRef=EXIF.getTag(this,'GPSLatitudeRef');const lng=EXIF.getTag(this,'GPSLongitude');const lngRef=EXIF.getTag(this,'GPSLongitudeRef');if(!lat||!lng)return res(null);const d=dms=>dms[0]+dms[1]/60+dms[2]/3600;let la=d(lat),lo=d(lng);if(latRef==='S')la=-la;if(lngRef==='W')lo=-lo;res([la,lo]);});});}
+    function getExifDate(file){return new Promise(res=>{EXIF.getData(file,function(){const raw=EXIF.getTag(this,'DateTimeOriginal');if(!raw)return res(null);res(raw.replace(/:/g,'-').replace(' ','T'));});});}
+
+    imageInput.addEventListener('change',async e=>{
+      const files=[...e.target.files].filter(f=>f.type.startsWith('image/'));
+      photoData=[];
+      for(const f of files){
+        const ll=await getExifLatLng(f); if(!ll) continue;
+        const dt=await getExifDate(f);
+        photoData.push({fileName:f.name,latitude:ll[0],longitude:ll[1],dateTime:dt,url:URL.createObjectURL(f)});
+      }
+      status.textContent=`${photoData.length}枚の写真を読み込みました`;
+      processPhotos();
+    });
+
+    function dist(a,b){const R=6371;const dLat=(b.lat-a.lat)*Math.PI/180;const dLon=(b.lng-a.lng)*Math.PI/180;const x=Math.sin(dLat/2)**2+Math.cos(a.lat*Math.PI/180)*Math.cos(b.lat*Math.PI/180)*Math.sin(dLon/2)**2;return R*2*Math.atan2(Math.sqrt(x),Math.sqrt(1-x));}
+
+    function processPhotos(){
+      markers.forEach(m=>map.removeLayer(m)); markers=[]; gallery.innerHTML='';
+      const r=parseFloat(clusterRadiusInput.value);
+      const clusters=[]; const used=new Array(photoData.length).fill(false);
+      for(let i=0;i<photoData.length;i++){if(used[i])continue;const clu=[photoData[i]];used[i]=true;
+        for(let j=i+1;j<photoData.length;j++){if(used[j])continue;
+          if(dist({lat:photoData[i].latitude,lng:photoData[i].longitude},{lat:photoData[j].latitude,lng:photoData[j].longitude})<=r){clu.push(photoData[j]);used[j]=true;}
+        } clusters.push(clu);
+      }
+      clusters.forEach(g=>{
+        const lat=g.reduce((s,p)=>s+p.latitude,0)/g.length;
+        const lng=g.reduce((s,p)=>s+p.longitude,0)/g.length;
+        const size=Math.min(40,16+Math.log10(g.length+1)*10);
+        const icon=L.divIcon({html:`<div class="cluster-icon" style="width:${size}px;height:${size}px;font-size:${size*0.5}px;">${g.length}</div>`,className:'',iconSize:[size,size],iconAnchor:[size/2,size/2]});
+        const mk=L.marker([lat,lng],{icon}).addTo(map);
+        const dates=g.filter(p=>p.dateTime).map(p=>new Date(p.dateTime)).sort((a,b)=>a-b);
+        const pop=dates.length?`${format(dates[0])} - ${format(dates[dates.length-1])}`:'撮影日時情報なし';
+        mk.bindPopup(`<strong>${g.length}枚の写真</strong><br>${pop}`);
+        mk.on('click',()=>{gallery.innerHTML='';g.forEach(p=>{const im=document.createElement('img');im.src=p.url;im.className='photo-thumb';im.title=p.fileName;gallery.appendChild(im);});});
+        markers.push(mk);
+      });
+      status.textContent=`クラスタ数：${clusters.length}`;
+    }
+
+    function format(d){if(!d||isNaN(d))return '';const y=d.getFullYear(),m=String(d.getMonth()+1).padStart(2,'0'),dd=String(d.getDate()).padStart(2,'0'),h=String(d.getHours()).padStart(2,'0'),mi=String(d.getMinutes()).padStart(2,'0');return `${y}/${m}/${dd} ${h}:${mi}`;}
+
+    function downloadJSON(){
+      const out=photoData.map(p=>({fileName:p.fileName,latitude:p.latitude,longitude:p.longitude,dateTime:p.dateTime}));
+      const blob=new Blob([JSON.stringify(out,null,2)],{type:'application/json'});
+      const url=URL.createObjectURL(blob);
+      const a=document.createElement('a');a.href=url;a.download='photo-database.json';a.click();
+    }
+  </script>
+</body>
+</html>
